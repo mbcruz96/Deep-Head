@@ -1,0 +1,20 @@
+torch
+datasets
+tokenizers
+tqdm
+tensorboard
+torchmetrics
+typing
+pathlib
+torchvision
+transformers @ git+https://github.com/huggingface/transformers@cae78c46
+dataclasses
+numpy
+nltk
+pandas
+tensorboard
+einops
+matplotlib
+altair
+warnings
+pandas
