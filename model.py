@@ -214,7 +214,7 @@ class Transformer(nn.Module):
 
 '''
 
-TO-DO: Finish implementing skip connection implementation for encoder
+TO-DO: Decide whether skip connection should send unadded & unormalized attentions scores or normalized scores
 
 '''
 class DeepHead(nn.Module):
@@ -227,7 +227,7 @@ class DeepHead(nn.Module):
         self.src_embed = src_embed
         self.tgt_embed = tgt_embed
         self.projection_layer = projection_layer
-        self.residual_connections = nn.ModuleList(ResidualConnection(dropout) for _ in range(2))
+        self.residual_connection = ResidualConnection(dropout)
         self.prev_layer = None
         
     def encode(self, src, src_mask):
@@ -237,9 +237,9 @@ class DeepHead(nn.Module):
         if self.prev_layer == None:
             self.prev_layer = encoded
         else:
-            #SKIP CONNECTION NEEDS TO BE HERE, SEE ENCODER BLOCK CLASS FOR EXAMPLE
-            #x = self.residual_connections[0](x, lambda x: self.attention_block(x, x, x, src_mask))
-            #x = self.residual_connections[1](x, self.ff_block)
+            # skip connection between transformers
+            #unormalized = encoded
+            encoded = self.residual_connection(encoded, self.prev_layer)
             self.prev_layer = encoded
         return encoded
 
@@ -296,7 +296,7 @@ def BuildTransformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int,
 Finished implementing multi-head self attention in encoder
 
 '''
-def BuildDeepHead(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, h: list[int] = [32, 32, 16, 16, 8, 8], N: int = 6, d_ff: int = 2048, dropout: float = 0.1) -> Transformer:
+def BuildDeepHead(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, h: list[int] = [64, 32, 16, 8, 4, 2], N: int = 6, d_ff: int = 2048, dropout: float = 0.1) -> Transformer:
     # Create embedding layers
     src_embedding = TextEmbeddings(d_model, src_vocab_size)
     tgt_embedding = TextEmbeddings(d_model, tgt_vocab_size)
