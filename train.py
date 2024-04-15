@@ -117,6 +117,7 @@ def Train_model(config):
       print(f'Starting training at epoch {initial_epoch}')
     else:
       model_filename = Get_Model_File_Path(config)
+      config['preload'] = 'latest'
       print(f'No model found to preload')
       print(f'Starting training at epoch {initial_epoch}')
 
