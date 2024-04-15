@@ -116,7 +116,7 @@ def Train_model(config):
       global_step = state['global_step']
       print(f'Starting training at epoch {initial_epoch}')
     else:
-      model_filename = Get_Model_File_Path(config, config['preload'])
+      model_filename = Get_Model_File_Path(config)
       print(f'No model found to preload')
       print(f'Starting training at epoch {initial_epoch}')
 
