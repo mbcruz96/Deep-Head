@@ -12,7 +12,7 @@ def Get_Config():
         "model_folder": "weights",
         "model_basename": "tmodel_",
         "output_path": "/output/models/",
-        "preload": "latest",
+        "preload": "None",
         "tokenizer_filename": "tokenizer_{0}.json",
         "experiment_name": "runs/tmodel"
     }
