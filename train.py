@@ -1,30 +1,3 @@
-import model
-import config
-import bilingual_dataset
-import inference
-import torch
-import torch.nn as nn
-import math
-from typing import Any
-from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, random_split
-from torch.utils.tensorboard import SummaryWriter
-import torchmetrics
-from torchmetrics.text import CharErrorRate, WordErrorRate, BLEUScore
-from datasets import load_dataset
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.trainers import WordLevelTrainer
-from tokenizers.pre_tokenizers import Whitespace
-from tqdm import tqdm
-import numpy as np
-import nltk
-import pandas as pd
-import tensorboard
-import matplotlib as plt
-import altair
-import warnings
-
 def Get_All_Sentances(ds, lang):
     for item in ds:
         yield item['translation'][lang]
@@ -76,8 +49,12 @@ def Get_Dataset(config):
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
-def Get_Model(config, src_vocab_size, tgt_vocab_size):
+def Get_Transformer(config, src_vocab_size, tgt_vocab_size):
     model = BuildTransformer(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
+    return model
+
+def Get_DeepHead(config, src_vocab_size, tgt_vocab_size):
+    model = BuildDeepHead(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
     return model
 
 def Train_model(config):
@@ -93,7 +70,7 @@ def Train_model(config):
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = Get_Dataset(config)
 
     # Initialize model
-    model = Get_Model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+    model = Get_DeepHead(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
 
     # Create a tensorboard for loss visualization
     writer = SummaryWriter(config['experiment_name'])
@@ -179,7 +156,7 @@ def Train_model(config):
         # Run validation at the end of each epoch
         Run_Validation(model, device, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], lambda msg: batch_iterator.write(msg), global_step, writer)
     print('\nTraining complete...')
-    
+
 if __name__=="__main__":
     config = Get_Config()
     Train_model(config)
