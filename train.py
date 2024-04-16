@@ -73,7 +73,7 @@ def Train_model(config):
 
     # Initialize model
     # Choose which model to train
-    model = Get_DeepHead(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+    model = Get_Transformer(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
 
     # Create a tensorboard for loss visualization
     writer = SummaryWriter(config['experiment_name'])
