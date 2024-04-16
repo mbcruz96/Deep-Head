@@ -49,10 +49,12 @@ def Get_Dataset(config):
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
+# Initializes Transformer model
 def Get_Transformer(config, src_vocab_size, tgt_vocab_size):
     model = BuildTransformer(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
     return model
 
+# Initializes DeepHead model
 def Get_DeepHead(config, src_vocab_size, tgt_vocab_size):
     model = BuildDeepHead(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
     return model
@@ -70,6 +72,7 @@ def Train_model(config):
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = Get_Dataset(config)
 
     # Initialize model
+    # Choose which model to train
     model = Get_DeepHead(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
 
     # Create a tensorboard for loss visualization
