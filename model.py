@@ -1,189 +1,337 @@
-import model
-import config
-import bilingual_dataset
-import inference
 import torch
 import torch.nn as nn
 import math
 from typing import Any
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, random_split
-from torch.utils.tensorboard import SummaryWriter
-import torchmetrics
-from torchmetrics.text import CharErrorRate, WordErrorRate, BLEUScore
-from datasets import load_dataset
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.trainers import WordLevelTrainer
-from tokenizers.pre_tokenizers import Whitespace
-from tqdm import tqdm
-import numpy as np
-import nltk
-import pandas as pd
-import tensorboard
-import matplotlib as plt
-import altair
-import warnings
 
-def Get_All_Sentances(ds, lang):
-    for item in ds:
-        yield item['translation'][lang]
+class TextEmbeddings(nn.Module):
+    def __init__(self, d_model: int, vocab_size: int):
+        super().__init__()
+        self.d_model = d_model  # embedding dimensionality
+        self.vocab_size = vocab_size    # size of corpus vocabulary
+        self.embedding = nn.Embedding(vocab_size, d_model)  # learnable vobabulary embedding
 
-def Get_or_Build_Tokenizer(config, ds, lang):
-    tokenizer_path = Get_Tokenizer_File_Path(config, lang)
-    if not Path(tokenizer_path).exists():
-        print('Tokenizer not found, building...')
-        tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
-        tokenizer.pre_tokenizer = Whitespace()
-        trainer = WordLevelTrainer(special_tokens=['[UNK]', '[PAD]', '[SOS]', '[EOS]'], min_frequency=2)
-        tokenizer.train_from_iterator(Get_All_Sentances(ds, lang), trainer=trainer)
-        tokenizer.save(str(tokenizer_path))
-    else:
-        print('Tokenizer found, loading...')
-        tokenizer = Tokenizer.from_file(str(tokenizer_path))
-    return tokenizer
+    def forward(self, x):
+        return self.embedding(x) * math.sqrt(self.d_model)
 
-def Get_Dataset(config):
-    ds_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split='train')
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, sequence_len: int, dropout: float) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.sequence_len = sequence_len
+        self.dropout = nn.Dropout(dropout)
 
-    # Built tokenizer
-    tokenizer_src = Get_or_Build_Tokenizer(config, ds_raw, config['lang_src'])
-    tokenizer_tgt = Get_or_Build_Tokenizer(config, ds_raw, config['lang_tgt'])
+        # creating a positional encoding matrix of dimension (sequence length, embedding dimensionality)
+        pos_enc = torch.zeros(sequence_len, d_model)
+        # creating positions vector of dimenstion (sequence length, 1)
+        positions = torch.arange(0, sequence_len, dtype=torch.float).unsqueeze(1)
+        divisor = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pos_enc[:, ::2] = torch.sin(positions * divisor)
+        pos_enc[:, 1::2] = torch.cos(positions * divisor)
 
-    # Split train and validation sets
-    train_ds_size = int(0.9 * len(ds_raw))
-    val_ds_size = len(ds_raw) -  train_ds_size
-    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size])
+        # creating a positional encoding for a batch of embeddings of size (1, sequence length, embedding dimensionality)
+        pos_enc = pos_enc.unsqueeze(0)
 
-    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+        # saving positional encoding as non-learnable parameter in same file as model weights
+        self.register_buffer('pos_enc', pos_enc)
+
+    def forward(self, x):
+        x = x + (self.pos_enc[:, :x.shape[1], :]).requires_grad_(False)
+        return self.dropout(x)
+
+class LayerNormalizationBlock(nn.Module):
+    def __init__(self, eps: float = 10**-6) -> None:
+        super().__init__()
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.ones(1, device='cuda')) # Multiplicative parameter
+        self.beta = nn.Parameter(torch.zeros(1, device='cuda')) # Addative parameter
+
+    # input: (batch_size, seq_len, emb_dim)
+    def forward(self, x):
+        mean = x.mean(dim=-1, keepdim=True)
+        std = x.std(dim=-1, keepdim=True)
+        return self.gamma * (x - mean) / (std + self.eps) + self.beta
+
+class FeedForwardBlock(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
+        super().__init__()
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.layer1 = nn.Linear(d_model, d_ff).to(self.device)  # fc layer of dimension (ff_dim, emb_dim)
+        self.layer2 = nn.Linear(d_ff, d_model).to(self.device)  # fc layer of dimension (emb_dim, ff_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # input: (batch_size, seq_len, emb_dim, ff_dim) --> (batch_size, seq_len, ff_dim, emb_dim) --> (batch_size, seq_len, emb_dim, ff_dim)
+        x = torch.relu(self.layer1(x))
+        x = self.dropout(x)
+        return self.layer2(x)
+
+class MultiHeadSelfAttentionBlock(nn.Module):
+    def __init__(self, d_model: int, h: int, dropout: float) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.h = h
+        self.dropout = nn.Dropout(dropout)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        assert d_model % h == 0, 'Embedding dimensionality not divisible by number of heads'
+        self.d_k = d_model // h
+
+        # learnable weight matrices
+        self.w_q = nn.Linear(d_model, d_model).to(self.device)
+        self.w_k = nn.Linear(d_model, d_model).to(self.device)
+        self.w_v = nn.Linear(d_model, d_model).to(self.device)
+        self.w_o = nn.Linear(d_model, d_model).to(self.device)
+
+    @staticmethod
+    def attention(query, key, value, mask, dropout: nn.Dropout):
+        d_k = query.shape[-1]
+
+        # input: (batch, h, seq_len, d_k) --> (batch, h, seq_len, seq_len)
+        attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
+
+        if mask is not None:
+            attention_scores.masked_fill_(mask == 0, -1**9)
+        # (batch, h, seq_len, seq_len)
+        attention_scores = torch.softmax(attention_scores, dim=-1)
+        if dropout is not None:
+            dropout(attention_scores)
+        return (attention_scores @ value), attention_scores
+
+    def forward(self, q, k, v, mask):
+        # input: (batch, seq_len, d_model) --> (batch, seq_len, d_model)
+        query = self.w_q(q)
+        key = self.w_k(k)
+        value = self.w_v(v)
+
+        # input: (batch, seq_len, d_model) --> (batch, seq_len, h, d_k) --> (batch, h, seq_len, d_k)
+        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
+        query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
+        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
+
+        x, self.attention_scores = MultiHeadSelfAttentionBlock.attention(query, key, value, mask, self.dropout)
+
+        # input: (batch, h, seq_len, d_k) --> (batch, seq_len, h, d_k) --> (batch, seq_len, d_model)
+        x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k) # contiguous allows tensor shape to be changed in contiguous memory block
+
+        return self.w_o(x)
+
+class ResidualConnection(nn.Module):
+    def __init__(self, dropout: float) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        self.norm = LayerNormalizationBlock()
+
+    def forward(self, skip_layer, prev_layer):
+        return skip_layer + self.dropout(prev_layer(self.norm(skip_layer)))
+
+class EncoderBlock(nn.Module):
+    def __init__(self, attention_block: MultiHeadSelfAttentionBlock, ff_block: FeedForwardBlock, dropout: float) -> None:
+        super().__init__()
+        self.attention_block = attention_block
+        self.ff_block = ff_block
+        self.dropout = nn.Dropout(dropout)
+        self.residual_connections = nn.ModuleList(ResidualConnection(dropout) for _ in range(2))
+
+    def forward(self, x, src_mask):
+        x = self.residual_connections[0](x, lambda x: self.attention_block(x, x, x, src_mask))
+        x = self.residual_connections[1](x, self.ff_block)
+        return x
+
+class Encoder(nn.Module):
+    def __init__(self, layers: nn.ModuleList) -> None:
+        super().__init__()
+        self.layers = layers
+        self.norm = LayerNormalizationBlock()
+
+    def forward(self, x, src_mask):
+        for layer in self.layers:
+            x = layer(x, src_mask)
+        return self.norm(x)
+
+class DecoderBlock(nn.Module):
+    def __init__(self, attention_block: MultiHeadSelfAttentionBlock, cross_attention_block: MultiHeadSelfAttentionBlock, ff_block: FeedForwardBlock, dropout: float) -> None:
+        super().__init__()
+        self.attention_block = attention_block
+        self.cross_attention_block = cross_attention_block
+        self.ff_block = ff_block
+        self.dropout = nn.Dropout(dropout)
+        self.residual_connections = nn.ModuleList(ResidualConnection(dropout) for _ in range(3))
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+        x = self.residual_connections[0](x, lambda x: self.attention_block(x, x, x, tgt_mask))
+        x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output, encoder_output, src_mask))
+        x = self.residual_connections[2](x, self.ff_block)
+        return x
+
+class Decoder(nn.Module):
+    def __init__(self, layers: nn.ModuleList) -> None:
+        super().__init__()
+        self.layers = layers
+        self.norm = LayerNormalizationBlock()
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+        for layer in self.layers:
+            x = layer(x, encoder_output, src_mask, tgt_mask)
+        return self.norm(x)
 
 
-    max_len_src = 0
-    max_len_tgt = 0
+class ProjectionLayer(nn.Module):
+    def __init__(self, d_model: int, vocab_size: int) -> None:
+        super().__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.projection = nn.Linear(d_model, vocab_size).to(self.device)
 
-    for item in ds_raw:
-        src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
-        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
-        max_len_src = max(max_len_src, len(src_ids))
-        max_len_tgt = max(max_len_tgt, len(tgt_ids))
+    def forward(self, x):
+        # input: (batch, seq_len, d_model) --> (batch, seq_len, vocab_size)
+        return torch.log_softmax(self.projection(x), dim=-1) # log softmax for numerical stability
 
-    print(f'Max length of source sentance: {max_len_src}')
-    print(f'Max length of target sentance: {max_len_tgt}')
+class Transformer(nn.Module):
+    def __init__(self, encoder: Encoder, decoder: Decoder, src_pos_enc: PositionalEncoding, tgt_pos_enc: PositionalEncoding, src_embed: TextEmbeddings, tgt_embed: TextEmbeddings, projection_layer: ProjectionLayer) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_pos_enc = src_pos_enc
+        self.tgt_pos_enc = tgt_pos_enc
+        self.src_embed = src_embed
+        self.tgt_embed = tgt_embed
+        self.projection_layer = projection_layer
 
-    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
-    val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
+    def encode(self, src, src_mask):
+        src = self.src_embed(src)
+        src = self.src_pos_enc(src)
+        return self.encoder(src, src_mask)
 
-    return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
+    def decode(self, tgt, encoder_output, src_mask, tgt_mask,):
+        tgt = self.tgt_embed(tgt)
+        tgt = self.tgt_pos_enc(tgt)
+        return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
 
-def Get_Transformer(config, src_vocab_size, tgt_vocab_size):
-    model = BuildTransformer(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
-    return model
+    def projection(self, x):
+        return self.projection_layer(x)
 
-def Get_DeepHead(config, src_vocab_size, tgt_vocab_size):
-    model = BuildDeepHead(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
-    return model
-    
-def Train_model(config):
-    # setting device to train on
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using device {device}')
+'''
 
-    # Create file for parameters to be saved to
-    model_folder = Get_Model_File_Path(config)
-    Path(model_folder).mkdir(parents=True, exist_ok=True)
+TO-DO: Decide whether skip connection should send unadded & unormalized attentions scores or normalized scores
 
-    # Initialize dataloaders and tokenizers
-    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = Get_Dataset(config)
+'''
+class DeepHead(nn.Module):
+    def __init__(self, encoder: Encoder, decoder: Decoder, src_pos_enc: PositionalEncoding, tgt_pos_enc: PositionalEncoding, src_embed: TextEmbeddings, tgt_embed: TextEmbeddings, projection_layer: ProjectionLayer) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_pos_enc = src_pos_enc
+        self.tgt_pos_enc = tgt_pos_enc
+        self.src_embed = src_embed
+        self.tgt_embed = tgt_embed
+        self.projection_layer = projection_layer
+        self.residual_connection = ResidualConnection(dropout)
+        self.prev_layer = None
 
-    # Initialize model
-    model = Get_DeepHead(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+    def encode(self, src, src_mask):
+        src = self.src_embed(src)
+        src = self.src_pos_enc(src)
+        encoded = self.encoder(src, src_mask)
+        if self.prev_layer == None:
+            self.prev_layer = encoded
+        else:
+            # skip connection between transformers
+            #unormalized = encoded
+            encoded = self.residual_connection(encoded, self.prev_layer)
+            self.prev_layer = encoded
+        return encoded
 
-    # Create a tensorboard for loss visualization
-    writer = SummaryWriter(config['experiment_name'])
+    def decode(self, tgt, encoder_output, src_mask, tgt_mask,):
+        tgt = self.tgt_embed(tgt)
+        tgt = self.tgt_pos_enc(tgt)
+        return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
 
-    # Initialize optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
+    def projection(self, x):
+        return self.projection_layer(x)
 
-    # Initial epoch start and global stop of this training cycle
-    initial_epoch = 0
-    global_step = 0
-    preload = config['preload']
-    # preload previous model parameters if they exist
-    if preload == "latest":
-      model_filename = Latest_Weights_File_Path(config)
-      print(f'Preloading model {model_filename}')
-      state = torch.load(model_filename)  # loading previous model state
-      initial_epoch = state['epoch'] + 1
-      model.load_state_dict(state['model_state_dict'])
-      optimizer.load_state_dict(state['optimizer_state_dict'])
-      global_step = state['global_step']
-      print(f'Starting training at epoch {initial_epoch}')
-    else:
-      model_filename = Get_Model_File_Path(config)
-      config['preload'] = 'latest'
-      print(f'No model found to preload')
-      print(f'Starting training at epoch {initial_epoch}')
+def BuildTransformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, h: int = 8, N: int = 6, d_ff: int = 2048, dropout: float = 0.1) -> Transformer:
+    # Create embedding layers
+    src_embedding = TextEmbeddings(d_model, src_vocab_size)
+    tgt_embedding = TextEmbeddings(d_model, tgt_vocab_size)
 
-    # Initializing loss function
-    # Ignores any padded tokens in loss computation
-    # Smoothes result by distributing .1 of argmax value to all other labels
-    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
+    # Create positional encodings
+    src_pos_enc = PositionalEncoding(d_model, src_seq_len, dropout)
+    tgt_pos_enc = PositionalEncoding(d_model, tgt_seq_len, dropout)
 
-    # Training loop
-    print('Beginning training...')
-    for epoch in range(initial_epoch, initial_epoch + config['num_epochs']):
-        torch.cuda.empty_cache()
-        model.train()
-        # Initialize batch iterator using tqdm for a progression bar visualization
-        batch_iterator = tqdm(train_dataloader, desc=f'Processing epoch {epoch:02d}')
-        for batch in batch_iterator:
-            if batch == None:
-                continue
-            encoder_input = batch['encoder_input'].to(device)   # input: (batch, seq_len)
-            decoder_input = batch['decoder_input'].to(device)   # input: (batch, seq_len)
-            encoder_mask = batch['encoder_mask'].to(device)     # (batch, 1, 1, seq_len) to mask padded tokens
-            decoder_mask = batch['decoder_mask'].to(device)     # (batch, 1, seq_len, seq_len) to mask padded tokens and future words
+    # Create encoder blocks
+    encoder_blocks = []
+    for _ in range(N):
+        attention_block = MultiHeadSelfAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(attention_block, feed_forward_block, dropout)
+        encoder_blocks.append(encoder_block)
 
-            # run tensors through model
-            encoder_output = model.encode(encoder_input, encoder_mask)  # (batch, seq_len, d_model)
-            decoder_output = model.decode(decoder_input, encoder_output, encoder_mask, decoder_mask)    # (batch, seq_len, d_model)
-            projection_output = model.projection(decoder_output)    # (batch, seq_len, tgt_vocab_size)
-            # Get label from batch
-            label = batch['label'].to(device)
+    # Create decoder blocks
+    decoder_blocks = []
+    for _ in range(N):
+        attention_block = MultiHeadSelfAttentionBlock(d_model, h, dropout)
+        cross_attention_block = MultiHeadSelfAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(attention_block, cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append(decoder_block)
 
-            # input (batch, seq_len, tgt_vocab_size) --> (batch * seq_len, tgt_vocab_size)
-            loss = loss_fn(projection_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
+    # create encoder and decoder
+    encoder = Encoder(encoder_blocks)
+    decoder = Decoder(decoder_blocks)
+    # create projection layer
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
+    # create transformer
+    transformer = Transformer(encoder, decoder, src_pos_enc, tgt_pos_enc, src_embedding, tgt_embedding, projection_layer)
+    # Initialize transformer parameters for better learning
+    for layer in transformer.parameters():
+        if layer.dim() > 1:
+            nn.init.xavier_uniform_(layer)
 
-            # update the progress bar with the loss
-            batch_iterator.set_postfix({f'loss': f'{loss.item():6.3f}'})
+    return transformer
 
-            # log the loss in tensorboard
-            writer.add_scalar('train loss', loss.item(), global_step)
-            writer.flush()
+'''
 
-            # Backpropogate the loss
-            loss.backward()
+Finished implementing multi-head self attention in encoder
 
-            # update the weights
-            optimizer.step()
-            optimizer.zero_grad()
+'''
+def BuildDeepHead(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, h: list[int] = [64, 32, 16, 8, 4, 2], N: int = 6, d_ff: int = 2048, dropout: float = 0.1) -> Transformer:
+    # Create embedding layers
+    src_embedding = TextEmbeddings(d_model, src_vocab_size)
+    tgt_embedding = TextEmbeddings(d_model, tgt_vocab_size)
 
-            global_step += 1
+    # Create positional encodings
+    src_pos_enc = PositionalEncoding(d_model, src_seq_len, dropout)
+    tgt_pos_enc = PositionalEncoding(d_model, tgt_seq_len, dropout)
 
-        # Save the model at the end of every epoch
-        model_filename = Get_Weights_File_Path(config, f'{epoch:02d}')
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'global_step': global_step
-        }, model_filename)
+    # Create encoder blocks
+    encoder_blocks = []
+    for x in h:
+        attention_block = MultiHeadSelfAttentionBlock(d_model, x, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(attention_block, feed_forward_block, dropout)
+        encoder_blocks.append(encoder_block)
 
-        # Run validation at the end of each epoch
-        Run_Validation(model, device, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], lambda msg: batch_iterator.write(msg), global_step, writer)
-    print('\nTraining complete...')
-    
-if __name__=="__main__":
-    config = Get_Config()
-    Train_model(config)
+    # Create decoder blocks
+    decoder_blocks = []
+    for _ in range(N):
+        attention_block = MultiHeadSelfAttentionBlock(d_model, 8, dropout)
+        cross_attention_block = MultiHeadSelfAttentionBlock(d_model, 8, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(attention_block, cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append(decoder_block)
+
+    # create encoder and decoder
+    encoder = Encoder(encoder_blocks)
+    decoder = Decoder(decoder_blocks)
+    # create projection layer
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
+    # create transformer
+    transformer = Transformer(encoder, decoder, src_pos_enc, tgt_pos_enc, src_embedding, tgt_embedding, projection_layer)
+    # Initialize transformer parameters for better learning
+    for layer in transformer.parameters():
+        if layer.dim() > 1:
+            nn.init.xavier_uniform_(layer)
+
+    return transformer
