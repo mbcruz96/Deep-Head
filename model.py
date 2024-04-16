@@ -296,7 +296,7 @@ def BuildTransformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int,
 Finished implementing multi-head self attention in encoder
 
 '''
-def BuildDeepHead(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, h: list[int] = [64, 32, 16, 8, 4, 2], N: int = 6, d_ff: int = 2048, dropout: float = 0.1) -> Transformer:
+def BuildDeepHead(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, h = [64, 32, 16, 8, 4, 2], N: int = 6, d_ff: int = 2048, dropout: float = 0.1) -> Transformer:
     # Create embedding layers
     src_embedding = TextEmbeddings(d_model, src_vocab_size)
     tgt_embedding = TextEmbeddings(d_model, tgt_vocab_size)
