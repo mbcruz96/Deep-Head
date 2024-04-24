@@ -1,7 +1,7 @@
-import model
-import config
-import bilingual_dataset
-import inference
+from model import BuildDeepHead, BuildTransformer
+from config import Get_Config, Get_Weights_File_Path, Get_Tokenizer_File_Path, Get_Model_File_Path, Latest_Weights_File_Path
+from bilingual_dataset import BilingualDataset
+from inference import Greedy_Decode, beam_search_decode, Run_Validation
 import torch
 import torch.nn as nn
 import math
@@ -23,7 +23,9 @@ import pandas as pd
 import tensorboard
 import matplotlib as plt
 import altair
-import warnings
+import os
+#import warnings
+#from typing_extensions import ParamSpec
 
 def Get_All_Sentances(ds, lang):
     for item in ds:
@@ -76,12 +78,10 @@ def Get_Dataset(config):
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
-# Initializes Transformer model
 def Get_Transformer(config, src_vocab_size, tgt_vocab_size):
     model = BuildTransformer(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
     return model
 
-# Initializes DeepHead model
 def Get_DeepHead(config, src_vocab_size, tgt_vocab_size):
     model = BuildDeepHead(src_vocab_size, tgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
     return model
@@ -99,8 +99,7 @@ def Train_model(config):
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = Get_Dataset(config)
 
     # Initialize model
-    # Choose which model to train
-    model = Get_Transformer(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+    model = Get_DeepHead(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
 
     # Create a tensorboard for loss visualization
     writer = SummaryWriter(config['experiment_name'])
@@ -124,7 +123,7 @@ def Train_model(config):
       print(f'Starting training at epoch {initial_epoch}')
     else:
       model_filename = Get_Model_File_Path(config)
-      config['preload'] = 'latest'
+      #config['preload'] = 'latest'
       print(f'No model found to preload')
       print(f'Starting training at epoch {initial_epoch}')
 
