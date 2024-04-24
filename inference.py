@@ -1,3 +1,7 @@
+import model
+from bilingual_dataset import Causual_Mask
+import torch
+
 def Greedy_Decode(model, device, encoder_input, encoder_mask, src_tokenizer, tgt_tokenizer, max_len):
     sos_idx = tgt_tokenizer.token_to_id('[SOS]')
     eos_idx = tgt_tokenizer.token_to_id('[EOS]')
@@ -31,7 +35,7 @@ def Greedy_Decode(model, device, encoder_input, encoder_mask, src_tokenizer, tgt
     # return generated sequence without batch dimension
     return decoder_input.squeeze(0)
 
-def beam_search_decode(model, beam_size, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+def beam_search_decode(model, device, beam_size, source, source_mask, tokenizer_src, tokenizer_tgt, max_len):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
 
@@ -59,7 +63,7 @@ def beam_search_decode(model, beam_size, source, source_mask, tokenizer_src, tok
                 continue
 
             # Build the candidate's mask
-            candidate_mask = causal_mask(candidate.size(1)).type_as(source_mask).to(device)
+            candidate_mask = Causual_Mask(candidate.size(1)).type_as(source_mask).to(device)
             # calculate output
             out = model.decode(encoder_output, source_mask, candidate, candidate_mask)
             # get next token probabilities
@@ -86,7 +90,7 @@ def beam_search_decode(model, beam_size, source, source_mask, tokenizer_src, tok
 
     # Return the best candidate
     return candidates[0][0].squeeze()
-    
+
 def Run_Validation(model, device, val_ds, src_tokenizer, tgt_tokenizer, max_len, print_msg, global_step, writer, num_examples=2):
     model.eval()
     count = 0
@@ -103,7 +107,8 @@ def Run_Validation(model, device, val_ds, src_tokenizer, tgt_tokenizer, max_len,
             assert encoder_input.size(0) == 1, 'Batch size must be 1 for validation'
 
             # generate the output tokens
-            model_out = beam_search_decode(model, device, encoder_input, encoder_mask, src_tokenizer, tgt_tokenizer, max_len)
+            beam_size = 4
+            model_out = beam_search_decode(model, device, beam_size, encoder_input, encoder_mask, src_tokenizer, tgt_tokenizer, max_len)
 
             # get actual model output
             source_text = batch['source_text'][0]
