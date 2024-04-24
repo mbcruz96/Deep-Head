@@ -2,7 +2,7 @@ from pathlib import Path
 
 def Get_Config():
     return{
-        "batch_size": 16,
+        "batch_size": 32,
         "num_epochs": 20,
         "lr": 10**-4,
         "seq_len": 350,
@@ -11,7 +11,7 @@ def Get_Config():
         "lang_tgt": "es",
         "model_folder": "weights",
         "model_basename": "tmodel_",
-        "output_path": "/output/models/",
+        "output_path": "output/models/Transformer",
         "preload": "None",
         "tokenizer_filename": "tokenizer_{0}.json",
         "experiment_name": "runs/tmodel"
