@@ -1,6 +1,8 @@
 import model
 from bilingual_dataset import Causual_Mask
 import torch
+import torchmetrics
+from torchmetrics.text import CharErrorRate, WordErrorRate, BLEUScore
 
 def Greedy_Decode(model, device, encoder_input, encoder_mask, src_tokenizer, tgt_tokenizer, max_len):
     sos_idx = tgt_tokenizer.token_to_id('[SOS]')
