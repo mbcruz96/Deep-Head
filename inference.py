@@ -65,9 +65,9 @@ def beam_search_decode(model, device, beam_size, source, source_mask, tokenizer_
             # Build the candidate's mask
             candidate_mask = Causual_Mask(candidate.size(1)).type_as(source_mask).to(device)
             # calculate output
-            out = model.decode(encoder_output, source_mask, candidate, candidate_mask)
+            out = model.decode(candidate, encoder_output, source_mask, candidate_mask)
             # get next token probabilities
-            prob = model.project(out[:, -1])
+            prob = model.projection(out[:, -1])
             # get the top k candidates
             topk_prob, topk_idx = torch.topk(prob, beam_size, dim=1)
             for i in range(beam_size):
